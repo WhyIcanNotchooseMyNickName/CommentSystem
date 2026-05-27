@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>이산구조 댓글 시스템 구현</title>
+    <style>
+        body { font-family: 'Malgun Gothic', sans-serif; background-color: #f8f8f8; padding: 20px; }
+        .comment-thread { width: 800px; margin: 0 auto; background-color: white; border-radius: 5px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); padding: 10px; }
+        
+        .comment-item { display: flex; align-items: start; padding: 10px; border-bottom: 1px solid #eee; --level-indent: 1.5rem; }
+        .comment-item:last-child { border-bottom: none; }
+        
+        /* Depth 들여쓰기 */
+        .comment-level-1 { margin-left: calc(0 * var(--level-indent)); }
+        .comment-level-2 { margin-left: calc(1 * var(--level-indent)); }
+        .comment-level-3 { margin-left: calc(2 * var(--level-indent)); }
+        .comment-level-4 { margin-left: calc(3 * var(--level-indent)); }
+        .comment-level-5 { margin-left: calc(4 * var(--level-indent)); }
+        .comment-level-6 { margin-left: calc(5 * var(--level-indent)); }
+        
+        /* 대댓글 화살표 표시 */
+        [class*="comment-level-"]::before { content: "L"; margin-right: 5px; font-size: 0.8rem; color: #ccc; margin-top: 1px; }
+        .comment-level-1::before { content: ""; margin-right: 0; }
+        
+        .comment-main { flex-grow: 1; display: flex; flex-direction: column; }
+        .comment-meta { display: flex; align-items: center; justify-content: space-between; color: #777; font-size: 0.8rem; margin-bottom: 4px; }
+        .comment-meta-left { display: flex; align-items: center; }
+        .comment-meta-id { font-weight: bold; margin-right: 5px; color: #333; }
+        
+        /* 삭제 버튼 스타일 */
+        .delete-btn { background: none; border: none; color: #cc0000; font-size: 0.75rem; cursor: pointer; padding: 0; margin-left: 10px; }
+        .delete-btn:hover { text-decoration: underline; }
+
+        /* 댓글 본문 */
+        .comment-content { font-size: 0.95rem; margin-bottom: 2px; cursor: pointer; padding: 4px 0; transition: background-color 0.2s; white-space: pre-wrap;}
+        .comment-content:hover { background-color: #f1f1f1; border-radius: 4px;}
+        
+        .comment-time { color: #777; font-size: 0.8rem; margin-left: 15px; flex-shrink: 0; white-space: nowrap;}
+        
+        /* 입력창 디자인 */
+        .write-box { margin-top: 20px; padding: 15px; background: #f9f9f9; border: 1px solid #ddd; display: flex; gap: 5px; align-items: flex-start;}
+        .author-input { width: 100px !important; padding: 8px; border: 1px solid #ddd; height: 20px; }
+        
+        /* textarea 스타일 */
+        .content-input { flex-grow: 1; padding: 8px; border: 1px solid #ddd; resize: vertical; min-height: 20px; font-family: 'Malgun Gothic', sans-serif; line-height: 1.5; }
+        .write-box button { padding: 8px 15px; background: #3b4890; color: white; border: none; cursor: pointer; height: 38px;}
+        
+        .reply-box { display: none; margin-top: 10px; margin-left: var(--level-indent); padding: 10px; }
+        
+        #raw-data-container { margin-top: 30px; background: #282c34; color: #abb2bf; padding: 15px; border-radius: 5px; font-family: monospace; white-space: pre-wrap; display: none;}
+    </style>
+</head>
+<body>
+
+<div class="comment-thread">
+    <h2>전체 댓글</h2>
+    <div id="comment-list"></div>
+
+    <div class="write-box">
+        <input type="text" id="root-author" class="author-input" placeholder="닉네임" value="ㅇㅇ">
+        <textarea id="root-content" class="content-input" placeholder="댓글을 남겨보세요. (Enter: 등록, Alt+Enter: 줄바꿈)" onkeydown="handleKeyDown(event, null, 'root-author', 'root-content')"></textarea>
+        <button onclick="submitComment(null, 'root-author', 'root-content')">등록</button>
+    </div>
+
+    <button onclick="toggleRawData()" style="margin-top: 20px; background: #555; padding: 8px 15px; color: white; border: none; cursor: pointer;">Raw Data 보기</button>
+    <div id="raw-data-container"></div>
+</div>
+
+<script>
+    // 주소를 기준으로 계층형 정렬을 수행하는 핵심 로직
+    function sortComments(data) {
+        return data.sort((a, b) => {
+            const aParts = a.address.split('.').map(Number);
+            const bParts = b.address.split('.').map(Number);
+            const len = Math.max(aParts.length, bParts.length);
+            
+            for (let i = 0; i < len; i++) {
+                if (aParts[i] === undefined) return -1; // a가 부모인 경우 앞으로
+                if (bParts[i] === undefined) return 1;  // b가 부모인 경우 앞으로
+                if (aParts[i] !== bParts[i]) return aParts[i] - bParts[i]; // 숫자 크기 비교
+            }
+            return 0;
+        });
+    }
+
+    async function fetchComments() {
+        const res = await fetch('/comments/api/raw');
+        const json = await res.json();
+        
+        // 깊은 복사로 원본 Raw Data 보존
+        const rawData = JSON.parse(JSON.stringify(json.data));
+        
+        // 계층형 정렬 적용
+        const sortedData = sortComments(json.data);
+        
+        renderComments(sortedData);
+        renderRawData(rawData); // Raw Data는 백엔드에서 온 날것 그대로(삽입순) 표시
+    }
+
+    function renderComments(data) {
+        const list = document.getElementById('comment-list');
+        list.innerHTML = '';
+        
+        data.forEach(comment => {
+            const depth = (comment.address.match(/\./g) || []).length + 1;
+
+            const commentDiv = document.createElement('div');
+            commentDiv.className = `comment-item comment-level-${depth}`;
+            
+            commentDiv.innerHTML = `
+                <div class="comment-main">
+                    <div class="comment-meta">
+                        <div class="comment-meta-left">
+                            <span class="comment-meta-id">${comment.author} (Label: ${comment.address})</span>
+                        </div>
+                        <button class="delete-btn" onclick="deleteComment('${comment.address}')">삭제</button>
+                    </div>
+                    
+                    <div class="comment-content" onclick="toggleReplyBox('${comment.address}')" title="클릭하여 답글 달기">${comment.content}</div>
+                    
+                    <div id="reply-box-${comment.address}" class="write-box reply-box">
+                        <input type="text" id="author-${comment.address}" class="author-input" placeholder="닉네임" value="ㅇㅇ">
+                        <textarea id="input-${comment.address}" class="content-input" placeholder="대댓글 입력 (Enter: 등록, Alt+Enter: 줄바꿈)" onkeydown="handleKeyDown(event, '${comment.address}', 'author-${comment.address}', 'input-${comment.address}')"></textarea>
+                        <button onclick="submitComment('${comment.address}', 'author-${comment.address}', 'input-${comment.address}')">등록</button>
+                    </div>
+                </div>
+                <div class="comment-time">${comment.timestamp || ''}</div>
+            `;
+            list.appendChild(commentDiv);
+        });
+    }
+
+    // Enter 및 Alt+Enter 키보드 이벤트 제어
+    function handleKeyDown(event, parentAddress, authorId, contentId) {
+        if (event.key === 'Enter') {
+            if (event.altKey) {
+                // Alt + Enter : 줄바꿈 삽입
+                event.preventDefault();
+                const el = event.target;
+                const start = el.selectionStart;
+                const end = el.selectionEnd;
+                el.value = el.value.substring(0, start) + "\n" + el.value.substring(end);
+                el.selectionStart = el.selectionEnd = start + 1;
+            } else {
+                // 일반 Enter : 댓글 등록
+                event.preventDefault();
+                submitComment(parentAddress, authorId, contentId);
+            }
+        }
+    }
+
+    async function submitComment(parentAddress, authorId, contentId) {
+        const author = document.getElementById(authorId).value || "ㅇㅇ";
+        const content = document.getElementById(contentId).value;
+        if (!content.trim()) return alert("내용을 입력하세요.");
+
+        await fetch('/comments/api/add', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ parent_address: parentAddress || "", author: author, content: content })
+        });
+        
+        document.getElementById(contentId).value = ''; 
+        fetchComments();
+    }
+
+    async function deleteComment(address) {
+        if (!confirm(`Label ${address} 및 하위 대댓글이 모두 삭제됩니다. 계속하시겠습니까?`)) {
+            return;
+        }
+
+        await fetch('/comments/api/delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ address: address })
+        });
+        
+        fetchComments();
+    }
+
+    function toggleReplyBox(address) {
+        document.querySelectorAll('.reply-box').forEach(box => {
+            if(box.id !== `reply-box-${address}`) {
+                box.style.display = 'none';
+            }
+        });
+
+        const box = document.getElementById(`reply-box-${address}`);
+        box.style.display = box.style.display === 'flex' ? 'none' : 'flex';
+        
+        if(box.style.display === 'flex') {
+            document.getElementById(`input-${address}`).focus();
+        }
+    }
+
+    function renderRawData(data) {
+        const container = document.getElementById('raw-data-container');
+        container.textContent = JSON.stringify(data, null, 2);
+    }
+
+    function toggleRawData() {
+        const container = document.getElementById('raw-data-container');
+        
+        // 창이 열려있으면 닫기
+        if (container.style.display === 'block') {
+            container.style.display = 'none';
+        } else {
+            // 창을 열 때 서버에서 최신 데이터를 새로고침(Fetch) 한 뒤에 보여주기
+            fetchComments().then(() => {
+                container.style.display = 'block';
+            });
+        }
+    }
+
+    fetchComments();
+</script>
+
+</body>
+</html>
